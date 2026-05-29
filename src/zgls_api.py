@@ -29,8 +29,9 @@ from llama_server import LlamaServerConfig, LlamaServerModel, LlamaServerTokeniz
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROMPT_CFG_PATH = ROOT / "config" / "workflow_llm_prompts.json"
-HEADER_BITS = 16
-MAX_PAYLOAD_BITS = (2**HEADER_BITS) - 1
+HEADER_BITS = 0
+LEGACY_HEADER_BITS = 16
+MAX_PAYLOAD_BITS = (2**LEGACY_HEADER_BITS) - 1
 MAX_PAYLOAD_BYTES = MAX_PAYLOAD_BITS // 8
 WORD_RE = re.compile(r"[A-Za-z0-9']+")
 STRUCTURAL_ARTIFACT_RE = re.compile(
@@ -295,21 +296,21 @@ def validate_payload_bits(payload_bits: str) -> str:
 
 
 def payload_bits_to_framed_bits(payload_bits: str) -> ConstBitStream:
-    """Frame raw payload bits with a 16-bit payload-bit-length header."""
+    """Legacy frame format used by older generated stegotext."""
 
     payload = validate_payload_bits(payload_bits)
-    header = f"{len(payload):0{HEADER_BITS}b}"
+    header = f"{len(payload):0{LEGACY_HEADER_BITS}b}"
     return ConstBitStream(bin=header + payload)
 
 
 def framed_bits_to_payload_bits(bits: ConstBitStream) -> tuple[str, int]:
-    if len(bits) < HEADER_BITS:
+    if len(bits) < LEGACY_HEADER_BITS:
         raise ZGLSError(
-            f"incomplete framed payload: need at least {HEADER_BITS} bits, got {len(bits)}",
+            f"incomplete framed payload: need at least {LEGACY_HEADER_BITS} bits, got {len(bits)}",
             status_code=422,
         )
 
-    payload_bit_length = int(bits[:HEADER_BITS].bin, 2)
+    payload_bit_length = int(bits[:LEGACY_HEADER_BITS].bin, 2)
     if payload_bit_length <= 0:
         raise ZGLSError(f"invalid payload bit length in header: {payload_bit_length}", status_code=422)
     if payload_bit_length > MAX_PAYLOAD_BITS:
@@ -318,14 +319,14 @@ def framed_bits_to_payload_bits(bits: ConstBitStream) -> tuple[str, int]:
             status_code=422,
         )
 
-    needed_bits = HEADER_BITS + payload_bit_length
+    needed_bits = LEGACY_HEADER_BITS + payload_bit_length
     if len(bits) < needed_bits:
         raise ZGLSError(
             f"incomplete payload bits: need {needed_bits}, got {len(bits)}",
             status_code=422,
         )
 
-    payload_bits = bits[HEADER_BITS:needed_bits].bin
+    payload_bits = bits[LEGACY_HEADER_BITS:needed_bits].bin
     return payload_bits, payload_bit_length
 
 
@@ -333,7 +334,11 @@ def bytes_to_bits(raw: bytes) -> str:
     return "".join(f"{b:08b}" for b in raw)
 
 
-def payload_to_framed_bits(secret: str) -> ConstBitStream:
+def payload_bits_to_bits(payload_bits: str) -> ConstBitStream:
+    return ConstBitStream(bin=validate_payload_bits(payload_bits))
+
+
+def payload_to_bits(secret: str) -> ConstBitStream:
     raw = secret.encode("utf-8")
     if not raw:
         raise ZGLSError("secret must not be empty", status_code=400)
@@ -343,7 +348,49 @@ def payload_to_framed_bits(secret: str) -> ConstBitStream:
             f"secret too large: {len(raw)} bytes ({len(payload_bits)} bits, max={MAX_PAYLOAD_BITS} bits)",
             status_code=400,
         )
-    return payload_bits_to_framed_bits(payload_bits)
+    return payload_bits_to_bits(payload_bits)
+
+
+def payload_to_framed_bits(secret: str) -> ConstBitStream:
+    raw_bits = payload_to_bits(secret).bin
+    return payload_bits_to_framed_bits(raw_bits)
+
+
+def bits_to_payload_bits(bits: ConstBitStream, payload_bits_len: int) -> tuple[str, int]:
+    requested_len = int(payload_bits_len)
+    if requested_len <= 0:
+        raise ZGLSError("payload_bits_len must be positive", status_code=400)
+    if requested_len > MAX_PAYLOAD_BITS:
+        raise ZGLSError(
+            f"payload_bits_len too large: {requested_len} bits (max={MAX_PAYLOAD_BITS})",
+            status_code=400,
+        )
+    if len(bits) < requested_len:
+        raise ZGLSError(
+            f"incomplete payload bits: need {requested_len}, got {len(bits)}",
+            status_code=422,
+        )
+    return bits[:requested_len].bin, requested_len
+
+
+def bits_to_payload(bits: ConstBitStream, payload_bits_len: int) -> tuple[str, int]:
+    payload_bit_string, payload_bit_length = bits_to_payload_bits(bits, payload_bits_len)
+    if payload_bit_length % 8 != 0:
+        raise ZGLSError(
+            f"payload is not byte-aligned: {payload_bit_length} bits",
+            status_code=422,
+        )
+
+    payload_bits = ConstBitStream(bin=payload_bit_string)
+    bs = BitStream(payload_bits)
+    buf = bytearray()
+    while bs.pos < len(bs):
+        buf.append(bs.read("uint:8"))
+    try:
+        text = bytes(buf).decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ZGLSError(f"payload utf-8 decode failed: {e}", status_code=400) from e
+    return text, payload_bit_length // 8
 
 
 def framed_bits_to_payload(bits: ConstBitStream) -> tuple[str, int]:
@@ -771,9 +818,9 @@ class ZGLSClient:
         temperature_alpha: float | None = None,
         max_bpw: int | None = None,
     ) -> HideResult:
-        bits = payload_to_framed_bits(secret)
+        bits = payload_to_bits(secret)
         target_bits = int(len(bits))
-        payload_bits_len = target_bits - HEADER_BITS
+        payload_bits_len = target_bits
         payload_bytes = len(secret.encode("utf-8"))
         egs_params = replace(
             self.cfg.egs,
@@ -922,8 +969,10 @@ class ZGLSClient:
         self,
         *,
         prompt: str,
+        payload_bits: str,
         max_words: int = 40,
         payload_bits_candidates: list[int] | None = None,
+        initial_payload_bits: int | None = None,
         complete_sent: bool = False,
         request_id: str | None = None,
         payload_seed: int | None = None,
@@ -935,12 +984,39 @@ class ZGLSClient:
         temperature_alpha: float | None = None,
         max_bpw: int | None = None,
     ) -> CapacityProbeResult:
+        probe_bits = validate_payload_bits(payload_bits)
+        probe_bit_count = len(probe_bits)
+        initial_candidate_bits = (
+            probe_bit_count if initial_payload_bits is None else int(initial_payload_bits)
+        )
+        if initial_candidate_bits <= 0:
+            raise ZGLSError("initial payload bits must be positive", status_code=400)
+        if initial_candidate_bits > probe_bit_count:
+            raise ZGLSError(
+                f"initial payload bits must be <= supplied payload bitstream length ({probe_bit_count})",
+                status_code=400,
+            )
         candidates = (
-            [1, 2, 4, 8, 12, 16, 24, 32, 48, 64]
+            [
+                bits
+                for bits in (
+                    [
+                        initial_candidate_bits // (2**idx)
+                        for idx in range(initial_candidate_bits.bit_length())
+                        if initial_candidate_bits // (2**idx) > 0
+                    ]
+                    + [
+                        min(probe_bit_count, initial_candidate_bits * (2**idx))
+                        for idx in range(1, probe_bit_count.bit_length() + 1)
+                        if initial_candidate_bits * (2**idx) <= probe_bit_count
+                    ]
+                )
+                if bits > 0
+            ]
             if payload_bits_candidates is None
             else payload_bits_candidates
         )
-        candidates = sorted({int(x) for x in candidates})
+        candidates = list(dict.fromkeys(int(x) for x in candidates))
         if not candidates:
             raise ZGLSError("payload bit candidates must not be empty", status_code=400)
         if any(x <= 0 for x in candidates):
@@ -948,6 +1024,11 @@ class ZGLSClient:
         if any(x > MAX_PAYLOAD_BITS for x in candidates):
             raise ZGLSError(
                 f"payload bit candidates must be <= {MAX_PAYLOAD_BITS}",
+                status_code=400,
+            )
+        if any(x > probe_bit_count for x in candidates):
+            raise ZGLSError(
+                f"payload bit candidates must be <= supplied payload bitstream length ({probe_bit_count})",
                 status_code=400,
             )
 
@@ -989,18 +1070,15 @@ class ZGLSClient:
             "quality_min_words": self.cfg.quality_min_words,
             "quality_max_words": gate_max_words,
             "max_words": hard_max_words,
+            "initial_payload_bits": initial_candidate_bits,
             "payload_seed": seed_base,
         }
 
         trials: list[CapacityTrialResult] = []
         for candidate_bits in candidates:
-            payload_bits = deterministic_payload_bits(
-                length=candidate_bits,
-                seed=seed_base,
-                label=effective_hash,
-            )
-            framed_bits = payload_bits_to_framed_bits(payload_bits)
-            target_bits = len(framed_bits)
+            candidate_payload_bits = probe_bits[:candidate_bits]
+            raw_bits = payload_bits_to_bits(candidate_payload_bits)
+            target_bits = len(raw_bits)
             best_trial: CapacityTrialResult | None = None
 
             for retry in range(effective_quality_max_retries + 1):
@@ -1011,7 +1089,7 @@ class ZGLSClient:
                 out_ids, is_truncated, used_bits, ppl = hide_extract.hide_bits_with_prompt_ids_by_egs(
                     model=self.model,
                     prompt_ids=prompt_ids,
-                    bits=framed_bits,
+                    bits=raw_bits,
                     mode=egs_params.mode,
                     threshold=egs_params.threshold,
                     temperature=egs_params.temperature,
@@ -1075,11 +1153,12 @@ class ZGLSClient:
                     )
                     if is_succeed:
                         try:
-                            recovered_bits, recovered_len = framed_bits_to_payload_bits(
-                                ConstBitStream(extracted_bits)
+                            recovered_bits, recovered_len = bits_to_payload_bits(
+                                ConstBitStream(extracted_bits),
+                                candidate_bits,
                             )
                             decode_ok = recovered_len == candidate_bits
-                            secret_matches = decode_ok and recovered_bits == payload_bits
+                            secret_matches = decode_ok and recovered_bits == candidate_payload_bits
                         except ZGLSError as exc:
                             warnings.append(str(exc.detail))
                     else:
@@ -1160,6 +1239,7 @@ class ZGLSClient:
         cover_texts: list[str] | None = None,
         corpus: str | None = None,
         stego_token_ids: list[int] | None = None,
+        payload_bits_len: int | None = None,
         threshold: float | None = None,
         temperature: float | None = None,
         temperature_alpha: float | None = None,
@@ -1223,9 +1303,14 @@ class ZGLSClient:
                 params_used=asdict(egs_params),
             )
 
-        framed = ConstBitStream(extracted_bits)
-        payload_bit_string, payload_bits_len = framed_bits_to_payload_bits(framed)
-        secret, payload_bytes = framed_bits_to_payload(framed)
+        raw_bits = ConstBitStream(extracted_bits)
+        if payload_bits_len is None:
+            warnings.append("payload_bits_len omitted; trying legacy 16-bit framed decode")
+            payload_bit_string, payload_bits_len = framed_bits_to_payload_bits(raw_bits)
+            secret, payload_bytes = framed_bits_to_payload(raw_bits)
+        else:
+            payload_bit_string, payload_bits_len = bits_to_payload_bits(raw_bits, payload_bits_len)
+            secret, payload_bytes = bits_to_payload(raw_bits, payload_bits_len)
         return RevealResult(
             secret=secret,
             payload_bytes=payload_bytes,

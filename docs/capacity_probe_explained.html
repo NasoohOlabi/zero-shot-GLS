@@ -194,21 +194,21 @@
     </section>
 
     <section>
-      <h2>Payload Bits vs. Header Bits</h2>
+      <h2>Payload Bits</h2>
       <p>
-        ZGLS adds a small 16-bit header before the actual secret payload. The header tells the decoder how long the payload is. That header is necessary for decoding, but it is not counted as the research capacity score.
+        The original paper describes hiding and extracting a secret bitstream. This implementation now follows that accounting directly for new `/hide` and `/capacity_probe` calls: the encoder embeds the raw payload bits, with no hidden length header.
       </p>
       <div class="formula">
-        total_target_bits = payload_bits_exact + header_bits
+        total_target_bits = payload_bits_exact
       </div>
       <p>
-        So if the probe successfully hides <code>16</code> payload bits, the encoder actually tries to embed:
+        So if the probe successfully hides <code>16</code> payload bits, the encoder tries to embed:
       </p>
       <div class="formula">
-        16 payload bits + 16 header bits = 32 total target bits
+        16 payload bits = 16 total target bits
       </div>
       <p>
-        For fair comparison, report <code>payload_bits_exact</code> as capacity. Treat <code>total_target_bits</code> and <code>total_used_bits</code> as diagnostics.
+        For fair comparison with the paper-style idea of useful hidden information, report <code>payload_bits_exact</code> as capacity. Treat <code>total_target_bits</code> and <code>total_used_bits</code> as diagnostics for the same raw bitstream.
       </p>
     </section>
 
@@ -222,9 +222,11 @@
       <h3>Example request</h3>
       <pre><code>{
   "prompt": "You are writing natural short movie comments.\n\nExamples:\n- The acting was strong but the pacing felt uneven.\n- It had a few nice scenes, though the ending felt rushed.\n\nWrite one new natural short movie comment.",
+  "payload_bits": "1011001110001111000011110000111100001111000011110000111100001111",
   "max_words": 40,
   "quality_max_retries": 6,
-  "payload_bits_candidates": [1, 2, 4, 8, 12, 16, 24, 32, 48, 64],
+  "initial_payload_bits": 32,
+  "payload_bits_candidates": [64, 32, 16, 8],
   "complete_sent": true,
   "max_new_tokens": 64,
   "threshold": 0.005,
@@ -246,25 +248,25 @@
         <tbody>
           <tr>
             <td>8 bits</td>
-            <td>8 + 16 = 24 bits</td>
+            <td>8 bits</td>
             <td>"The cast is charming, though the story feels a little thin near the end."</td>
             <td><span class="ok">Success</span></td>
           </tr>
           <tr>
             <td>16 bits</td>
-            <td>16 + 16 = 32 bits</td>
+            <td>16 bits</td>
             <td>"The performances carry it well, but the final act wraps things up too quickly."</td>
             <td><span class="ok">Success</span></td>
           </tr>
           <tr>
             <td>24 bits</td>
-            <td>24 + 16 = 40 bits</td>
+            <td>24 bits</td>
             <td>"It has some memorable scenes, but the pacing drifts before the ending lands."</td>
             <td><span class="fail">Fail</span>: payload mismatch</td>
           </tr>
           <tr>
             <td>32 bits</td>
-            <td>32 + 16 = 48 bits</td>
+            <td>32 bits</td>
             <td>"The movie looks great and starts strongly, but it loses focus halfway through."</td>
             <td><span class="fail">Fail</span>: insufficient used bits</td>
           </tr>
@@ -277,11 +279,11 @@
           payload bits encoded
         </div>
         <div class="metric">
-          <strong>16</strong>
+          <strong>0</strong>
           header bits
         </div>
         <div class="metric">
-          <strong>32</strong>
+          <strong>16</strong>
           total target bits
         </div>
       </div>
@@ -304,7 +306,7 @@
         <tbody>
           <tr>
             <td>Fully embedded</td>
-            <td>The generated text carried the whole framed bitstream: header plus payload.</td>
+            <td>The generated text carried the whole raw payload bitstream.</td>
           </tr>
           <tr>
             <td>Word limit passed</td>
@@ -329,15 +331,16 @@
     <section>
       <h2>Common Confusion</h2>
       <div class="panel">
-        <p><span class="warn">Do not say capacity is 32 bits</span> in the 16-bit example just because <code>16 payload + 16 header = 32 total target bits</code>.</p>
-        <p>The fair capacity number is only the useful secret payload: <code>16</code> bits.</p>
+        <p><span class="warn">Do not add legacy header overhead</span> to the capacity number.</p>
+        <p>The fair capacity number is the useful secret payload: <code>16</code> bits.</p>
+        <p>New outputs do not embed the old 16-bit length header.</p>
       </div>
       <p>
-        A good report can still include the header and total bits, but label them clearly:
+        A good report can still include diagnostic totals, but they should match the raw payload for new outputs:
       </p>
       <pre><code>payload_bits_encoded: 16
-protocol_overhead_bits: 16
-total_embedded_bits: 32
+protocol_overhead_bits: 0
+total_embedded_bits: 16
 decode_ok: true</code></pre>
     </section>
   </main>

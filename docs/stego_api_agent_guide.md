@@ -10,10 +10,10 @@ The main capacity metric is raw payload bits recovered under the hard visible wo
 payload_bits_encoded
 ```
 
-Do not report framed totals as capacity. ZGLS uses a 16-bit payload-bit-length header, so:
+New `/hide` and `/capacity_probe` calls embed only those payload bits. The compatibility `header_bits` field is `0`, so:
 
 ```text
-total_embedded_bits = payload_bits_encoded + protocol_overhead_bits
+total_embedded_bits = payload_bits_encoded
 ```
 
 ## Base URL
@@ -35,9 +35,11 @@ Call `POST /capacity_probe`.
 ```json
 {
   "prompt": "complete prompt with examples",
+  "payload_bits": "1011001110001111000011110000111100001111000011110000111100001111",
   "max_words": 40,
   "quality_max_retries": 6,
-  "payload_bits_candidates": [1, 2, 4, 8, 12, 16, 24, 32, 48, 64],
+  "initial_payload_bits": 32,
+  "payload_bits_candidates": [64, 32, 16, 8],
   "complete_sent": true,
   "max_new_tokens": 64,
   "threshold": 0.005,
@@ -50,22 +52,23 @@ Call `POST /capacity_probe`.
 Interpretation:
 
 - `best_success.payload_bits_exact` is the capacity score.
-- `best_success.header_bits` is overhead.
-- `best_success.total_target_bits` is diagnostic only.
-- `trials` contains failed and successful candidates with `failure_reason`.
+- `best_success.header_bits` is a compatibility field and should be `0`.
+- `best_success.total_target_bits` equals the raw payload target.
+- `payload_bits_candidates` are prefix lengths into `payload_bits`; omit them to try `initial_payload_bits`, then smaller halves and larger doublings within the supplied stream. If `initial_payload_bits` is omitted, the probe starts at the full stream length.
+- `trials` contains failed and successful prefix lengths with `failure_reason`.
 
 A trial is successful only if encoding, extraction, exact payload-bit match, word limit, and quality gate all pass.
 
-## Legacy Hide/Reveal
+## Hide/Reveal
 
 `POST /hide` accepts UTF-8 `secret` text. Its bit accounting is explicit:
 
 - `payload_bits`: UTF-8 payload bits
-- `header_bits`: 16
-- `total_target_bits`: payload plus header
-- `total_used_bits`: framed bits embedded
+- `header_bits`: `0`
+- `total_target_bits`: same as payload bits
+- `total_used_bits`: raw payload bits embedded
 
-`POST /reveal` returns UTF-8 text and also exposes `payload_bits` and `payload_bits_len`.
+`POST /reveal` returns UTF-8 text and also exposes `payload_bits` and `payload_bits_len`. Pass the `/hide` response's `payload_bits` value back as `payload_bits_len` when revealing. If `payload_bits_len` is omitted, the server only tries the older 16-bit framed decode for legacy stegotext.
 
 Use matching prompt and EGS parameters for reveal. Prefer passing `stego_token_ids` from `/hide`.
 
@@ -75,4 +78,4 @@ Use matching prompt and EGS parameters for reveal. Prefer passing `stego_token_i
 - Keep `max_words` the same for both methods.
 - Put the same post context and examples in each method's prompt.
 - Record failed trials instead of discarding them.
-- Compare by `payload_bits_encoded`, not `total_embedded_bits`.
+- Compare by `payload_bits_encoded`; new outputs do not include hidden header overhead.

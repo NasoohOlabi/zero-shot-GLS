@@ -178,6 +178,14 @@ class RevealRequest(BaseModel):
         default=None,
         description="Optional exact token ids from /hide for stable decode.",
     )
+    payload_bits_len: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Raw payload bit length returned by /hide as payload_bits. "
+            "Required for new headerless stegotext; omitted requests use legacy framed decode."
+        ),
+    )
     threshold: float | None = Field(
         default=None,
         gt=0,
@@ -220,6 +228,12 @@ class RevealResponse(BaseModel):
 
 class CapacityProbeRequest(BaseModel):
     prompt: str = Field(..., min_length=1, description="Complete prompt with examples/context.")
+    payload_bits: str = Field(
+        ...,
+        min_length=1,
+        description="Caller-supplied raw bitstream. Capacity trials use prefixes of this exact stream.",
+        pattern="^[01]+$",
+    )
     max_words: int = Field(default=40, ge=1, le=2000, description="Hard visible word limit.")
     quality_max_words: int | None = Field(
         default=None,
@@ -228,11 +242,25 @@ class CapacityProbeRequest(BaseModel):
         description="Optional quality gate word ceiling; capped at max_words.",
     )
     quality_max_retries: int | None = Field(default=None, ge=0, le=100)
-    payload_bits_candidates: list[int] = Field(
-        default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 48, 64],
-        description="Candidate raw payload bit lengths to test.",
+    payload_bits_candidates: list[int] | None = Field(
+        default=None,
+        description=(
+            "Optional prefix lengths to test against payload_bits. "
+            "When omitted, probes start at the full bitstream length and halve downward."
+        ),
     )
-    payload_seed: int | None = Field(default=None, description="Seed for deterministic probe bits.")
+    initial_payload_bits: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional starting prefix length. Without explicit candidates, the probe tries n, "
+            "then smaller halves and larger doublings within payload_bits."
+        ),
+    )
+    payload_seed: int | None = Field(
+        default=None,
+        description="Seed for deterministic probe trial ordering/context; payload bits come from payload_bits.",
+    )
     complete_sent: bool = Field(default=True)
     max_new_tokens: int | None = Field(default=None, ge=1, le=4096)
     threshold: float | None = Field(default=None, gt=0, lt=1)
@@ -303,8 +331,9 @@ def _help_payload(cfg: ZGLSConfig, client: ZGLSClient) -> dict:
             "The server does not add, sample, or retrieve cover text for /hide or /reveal.",
             "Use the exact same prompt and EGS parameters for /reveal. effective_prompt_hash is a mismatch check, not a secret.",
             "quality_passed=true means the current server quality gate accepted the visible stegotext.",
-            "Capacity is payload bits recovered under the hard word limit; framing/header overhead is reported separately.",
-            "Framed payloads use a 16-bit payload-bit-length header. UTF-8 /hide is a convenience wrapper over raw payload bits.",
+            "Capacity is raw payload bits recovered under the hard word limit.",
+            "New /hide and /capacity_probe outputs do not embed a length header. Pass payload_bits as payload_bits_len to /reveal.",
+            "If payload_bits_len is omitted, /reveal tries the older 16-bit framed decode for legacy stegotext.",
         ],
         "quality_gate": {
             "minimum_words": cfg.quality_min_words,
@@ -337,7 +366,7 @@ def _help_payload(cfg: ZGLSConfig, client: ZGLSClient) -> dict:
         },
         "endpoints": {
             "GET /health": {
-                "purpose": "Check backend, model, prompt mode, quality settings, and framing metadata.",
+                "purpose": "Check backend, model, prompt mode, quality settings, and payload metadata.",
                 "response": "Runtime metadata dictionary.",
             },
             "GET /help": {
@@ -375,11 +404,11 @@ def _help_payload(cfg: ZGLSConfig, client: ZGLSClient) -> dict:
                     "context_seed": "Legacy replay metadata; prompt construction does not depend on it.",
                     "effective_prompt_hash": "SHA-1 hash of the exact effective prompt; pass to /reveal to detect prompt mismatches.",
                     "used_bits": "Number of payload bits actually embedded.",
-                    "target_bits": "Number of framed bits required, including header overhead.",
-                    "payload_bits": "Raw UTF-8 payload bits; this excludes the 16-bit header.",
-                    "header_bits": "Protocol overhead bits in the frame header.",
-                    "total_target_bits": "payload_bits + header_bits.",
-                    "total_used_bits": "Framed bits embedded by the encoder.",
+                    "target_bits": "Number of raw payload bits required.",
+                    "payload_bits": "Raw UTF-8 payload bits. Pass this back to /reveal as payload_bits_len.",
+                    "header_bits": "Compatibility field; new outputs report 0.",
+                    "total_target_bits": "Same as payload_bits for new headerless outputs.",
+                    "total_used_bits": "Raw payload bits embedded by the encoder.",
                     "bpw_estimate": "Estimated embedded bits per visible word.",
                     "ppl": "Perplexity-style score from the ZGLS path.",
                     "quality_metrics": "Gate diagnostics for repetition, artifacts, punctuation, and encoding quality.",
@@ -408,9 +437,11 @@ def _help_payload(cfg: ZGLSConfig, client: ZGLSClient) -> dict:
                         "- It had a few nice scenes, though the ending felt rushed.\n\n"
                         "Write one new natural short movie comment."
                     ),
+                    "payload_bits": "1011001110001111000011110000111100001111000011110000111100001111",
                     "max_words": 40,
                     "quality_max_retries": 6,
-                    "payload_bits_candidates": [1, 2, 4, 8, 12, 16, 24, 32, 48, 64],
+                    "initial_payload_bits": 32,
+                    "payload_bits_candidates": [64, 32, 16, 8],
                     "complete_sent": True,
                     "max_new_tokens": 64,
                     "threshold": 0.005,
@@ -419,16 +450,16 @@ def _help_payload(cfg: ZGLSConfig, client: ZGLSClient) -> dict:
                     "max_bpw": 2,
                 },
                 "example_response_fields": {
-                    "best_success": "Largest successful trial by payload_bits_exact, or null.",
-                    "trials": "One structured result per candidate payload bit length.",
-                    "payload_bits_exact": "Main capacity metric; excludes header overhead.",
-                    "header_bits": "Protocol overhead, currently 16.",
-                    "total_target_bits": "payload_bits_exact + header_bits.",
-                    "total_used_bits": "Framed bits actually embedded by the encoder.",
+                    "best_success": "Largest successful prefix of the supplied bitstream, or null.",
+                    "trials": "One structured result per candidate prefix length.",
+                    "payload_bits_exact": "Main capacity metric: raw recovered payload bits.",
+                    "header_bits": "Compatibility field; new outputs report 0.",
+                    "total_target_bits": "Same as payload_bits_exact for new headerless outputs.",
+                    "total_used_bits": "Raw payload bits actually embedded by the encoder.",
                 },
                 "common_errors": {
                     "400": "Invalid prompt, word limit, or payload bit candidates.",
-                    "422": "Reserved for malformed framed data during extraction.",
+                    "422": "Reserved for malformed extracted data during legacy decode.",
                     "500": "Unexpected backend/server failure.",
                 },
             },
@@ -448,12 +479,13 @@ def _help_payload(cfg: ZGLSConfig, client: ZGLSClient) -> dict:
                     ),
                     "stegotext": "<stegotext from /hide>",
                     "stego_token_ids": ["<token ids from /hide>"],
+                    "payload_bits_len": 8,
                     "context_seed": 12345,
                     "effective_prompt_hash": "<hash from /hide>",
                 },
                 "example_response_fields": {
                     "secret": "Decoded UTF-8 secret, or null on failure.",
-                    "decode_ok": "True when extraction and framed payload decoding succeeded.",
+                    "decode_ok": "True when extraction and payload decoding succeeded.",
                     "warnings": "Includes prompt-hash mismatch or retokenized-text fallback warnings.",
                     "raw_bits_len": "Number of extracted raw bits observed by the decoder.",
                 },
@@ -482,7 +514,7 @@ def _help_payload(cfg: ZGLSConfig, client: ZGLSClient) -> dict:
             "reveal": (
                 "$body = @{ prompt=$prompt; stegotext=$hide.stegotext; "
                 "stego_token_ids=$hide.stego_token_ids; context_seed=$hide.context_seed; "
-                "effective_prompt_hash=$hide.effective_prompt_hash } | ConvertTo-Json -Depth 8; "
+                "effective_prompt_hash=$hide.effective_prompt_hash; payload_bits_len=$hide.payload_bits } | ConvertTo-Json -Depth 8; "
                 "Invoke-RestMethod http://<server-ip>:9000/reveal -Method Post "
                 "-ContentType 'application/json' -Body $body"
             ),
@@ -504,6 +536,7 @@ def _help_payload(cfg: ZGLSConfig, client: ZGLSClient) -> dict:
             "    'prompt': prompt,\n"
             "    'stegotext': hide['stegotext'],\n"
             "    'stego_token_ids': hide['stego_token_ids'],\n"
+            "    'payload_bits_len': hide['payload_bits'],\n"
             "    'context_seed': hide['context_seed'],\n"
             "    'effective_prompt_hash': hide['effective_prompt_hash'],\n"
             "}).json()\n"
@@ -683,10 +716,12 @@ def build_app(cfg: ZGLSConfig) -> FastAPI:
         try:
             result: CapacityProbeResult = client.capacity_probe(
                 prompt=req.prompt,
+                payload_bits=req.payload_bits,
                 max_words=req.max_words,
                 quality_max_words=req.quality_max_words,
                 quality_max_retries=req.quality_max_retries,
                 payload_bits_candidates=req.payload_bits_candidates,
+                initial_payload_bits=req.initial_payload_bits,
                 payload_seed=req.payload_seed,
                 complete_sent=req.complete_sent,
                 request_id=req_id,
@@ -719,6 +754,7 @@ def build_app(cfg: ZGLSConfig) -> FastAPI:
                 context_seed=req.context_seed,
                 effective_prompt_hash=req.effective_prompt_hash,
                 stego_token_ids=req.stego_token_ids,
+                payload_bits_len=req.payload_bits_len,
                 threshold=req.threshold,
                 temperature=req.temperature,
                 temperature_alpha=req.temperature_alpha,

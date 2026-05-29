@@ -100,6 +100,7 @@ def test_python_api_block_mode_if_backend_has_candidates():
         effective_prompt_hash=hidden.effective_prompt_hash,
         cover_texts=COVER_TEXTS,
         stego_token_ids=hidden.stego_token_ids,
+        payload_bits_len=hidden.payload_bits,
     )
     assert revealed.secret == "a"
 
@@ -109,7 +110,7 @@ def test_http_contract_health_hide_reveal_and_errors():
     http = TestClient(app)
     health = http.get("/health")
     assert health.status_code == 200
-    assert health.json()["header_bits"] == 16
+    assert health.json()["header_bits"] == 0
 
     hide = http.post(
         "/hide",
@@ -128,6 +129,7 @@ def test_http_contract_health_hide_reveal_and_errors():
             "prompt": "Write one natural short sentence about coffee.",
             "stegotext": payload["stegotext"],
             "stego_token_ids": payload["stego_token_ids"],
+            "payload_bits_len": payload["payload_bits"],
             "context_seed": payload["context_seed"],
             "effective_prompt_hash": payload["effective_prompt_hash"],
             "cover_texts": COVER_TEXTS,

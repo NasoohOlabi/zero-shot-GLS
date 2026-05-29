@@ -15,10 +15,10 @@ import bit2plain
 import codec
 import plain2bit
 from zgls_api import (
-    framed_bits_to_payload,
-    framed_bits_to_payload_bits,
-    payload_bits_to_framed_bits,
-    payload_to_framed_bits,
+    bits_to_payload,
+    bits_to_payload_bits,
+    payload_bits_to_bits,
+    payload_to_bits,
 )
 
 
@@ -148,20 +148,20 @@ def test_bit_wrapping_roundtrip_preserves_exact_payload_bits(bit_string, enable_
         "utf-8 secret: \u2603 \u0633\u0644\u0627\u0645",
     ],
 )
-def test_api_payload_message_frame_roundtrip(message):
-    framed = payload_to_framed_bits(message)
+def test_api_payload_message_roundtrip_without_header(message):
+    bits = payload_to_bits(message)
 
-    decoded, byte_len = framed_bits_to_payload(framed)
+    decoded, byte_len = bits_to_payload(bits, len(bits))
 
     assert decoded == message
     assert byte_len == len(message.encode("utf-8"))
 
 
 @pytest.mark.parametrize("payload_bits", ["1", "101", "0" * 15 + "1", "10101010101"])
-def test_api_payload_bits_frame_roundtrip_non_byte_aligned(payload_bits):
-    framed = payload_bits_to_framed_bits(payload_bits)
+def test_api_payload_bits_roundtrip_non_byte_aligned_without_header(payload_bits):
+    bits = payload_bits_to_bits(payload_bits)
 
-    recovered, bit_len = framed_bits_to_payload_bits(framed)
+    recovered, bit_len = bits_to_payload_bits(bits, len(payload_bits))
 
     assert recovered == payload_bits
     assert bit_len == len(payload_bits)

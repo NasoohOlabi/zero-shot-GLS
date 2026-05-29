@@ -16,37 +16,39 @@ from zgls_api import (
     CapacityTrialResult,
     HEADER_BITS,
     best_capacity_success,
+    bits_to_payload,
+    bits_to_payload_bits,
     bootstrap_ci,
     bootstrap_kld_ci,
     compute_metrics,
-    framed_bits_to_payload,
-    framed_bits_to_payload_bits,
     kld_from_counts,
-    payload_bits_to_framed_bits,
-    payload_to_framed_bits,
+    payload_bits_to_bits,
+    payload_to_bits,
     quality_pass,
     repetition_metrics,
 )
 
 
-def test_payload_frame_roundtrip_utf8():
-    bits = payload_to_framed_bits("cafe")
-    decoded, byte_len = framed_bits_to_payload(bits)
+def test_payload_roundtrip_utf8_without_header():
+    bits = payload_to_bits("cafe")
+    decoded, byte_len = bits_to_payload(bits, len(bits))
     assert decoded == "cafe"
     assert byte_len == len("cafe".encode("utf-8"))
-    payload_bits, payload_len = framed_bits_to_payload_bits(bits)
+    payload_bits, payload_len = bits_to_payload_bits(bits, len(bits))
     assert payload_len == 32
     assert len(payload_bits) == 32
+    assert len(bits) == payload_len
 
 
 @pytest.mark.parametrize("payload_len", [1, 11, 12, 13])
-def test_payload_frame_roundtrip_non_byte_aligned_bits(payload_len):
+def test_payload_roundtrip_non_byte_aligned_bits_without_header(payload_len):
     payload = ("10" * payload_len)[:payload_len]
-    framed = payload_bits_to_framed_bits(payload)
-    recovered, recovered_len = framed_bits_to_payload_bits(framed)
+    bits = payload_bits_to_bits(payload)
+    recovered, recovered_len = bits_to_payload_bits(bits, payload_len)
     assert recovered == payload
     assert recovered_len == payload_len
-    assert len(framed) == HEADER_BITS + payload_len
+    assert len(bits) == payload_len
+    assert HEADER_BITS == 0
 
 
 def test_bootstrap_ci_is_deterministic():
@@ -172,9 +174,9 @@ def make_capacity_trial(payload_bits: int, success: bool, word_count: int) -> Ca
         payload_bytes=math.ceil(payload_bits / 8),
         payload_bits_exact=payload_bits,
         header_bits=HEADER_BITS,
-        total_target_bits=HEADER_BITS + payload_bits,
-        total_used_bits=HEADER_BITS + payload_bits,
-        used_bits=HEADER_BITS + payload_bits,
+        total_target_bits=payload_bits,
+        total_used_bits=payload_bits,
+        used_bits=payload_bits,
         success=success,
         decode_ok=success,
         secret_matches=success,
@@ -198,7 +200,8 @@ def test_capacity_accounting_and_best_success():
     small = make_capacity_trial(8, True, 18)
     failed_large = make_capacity_trial(64, False, 39)
     medium = make_capacity_trial(24, True, 25)
-    assert medium.total_target_bits == medium.payload_bits_exact + medium.header_bits
+    assert medium.header_bits == 0
+    assert medium.total_target_bits == medium.payload_bits_exact
     assert best_capacity_success([small, failed_large, medium]) == medium
 
 
@@ -236,12 +239,14 @@ def test_http_models_expose_benchmark_overrides():
         "max_bpw",
     ):
         assert field in hide_schema["properties"]
-    for field in ("threshold", "temperature", "temperature_alpha", "max_bpw"):
+    for field in ("payload_bits_len", "threshold", "temperature", "temperature_alpha", "max_bpw"):
         assert field in reveal_schema["properties"]
     for field in (
         "prompt",
+        "payload_bits",
         "max_words",
         "payload_bits_candidates",
+        "initial_payload_bits",
         "payload_seed",
         "quality_max_retries",
         "threshold",

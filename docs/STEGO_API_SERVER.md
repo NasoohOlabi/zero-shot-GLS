@@ -15,13 +15,13 @@ The canonical capacity metric is:
 payload_bits_successfully_recovered_under_hard_visible_word_limit
 ```
 
-This excludes protocol framing overhead. ZGLS currently frames payloads with:
+New API outputs do not embed protocol framing overhead:
 
-- `header_bits = 16`
 - `payload_bits = raw secret payload bits`
-- `total_target_bits = header_bits + payload_bits`
+- `header_bits = 0`
+- `total_target_bits = payload_bits`
 
-Report `payload_bits` as the main capacity number. Report `total_target_bits` or `total_used_bits` only as diagnostics.
+Report `payload_bits` as the main capacity number. `total_target_bits` and `total_used_bits` are diagnostics for the same raw payload stream.
 
 The visible word limit is hard. The server no longer silently expands `quality_max_words` for larger payloads.
 
@@ -56,9 +56,11 @@ Example request:
 ```json
 {
   "prompt": "You are writing natural short movie comments.\n\nExamples:\n- The acting was strong but the pacing felt uneven.\n- It had a few nice scenes, though the ending felt rushed.\n\nWrite one new natural short movie comment.",
+  "payload_bits": "1011001110001111000011110000111100001111000011110000111100001111",
   "max_words": 40,
   "quality_max_retries": 6,
-  "payload_bits_candidates": [1, 2, 4, 8, 12, 16, 24, 32, 48, 64],
+  "initial_payload_bits": 32,
+  "payload_bits_candidates": [64, 32, 16, 8],
   "complete_sent": true,
   "max_new_tokens": 64,
   "threshold": 0.005,
@@ -70,7 +72,7 @@ Example request:
 
 Success requires all of:
 
-- framed payload fully embedded
+- raw payload fully embedded
 - generated text has `word_count <= max_words`
 - quality gate passes
 - extraction succeeds
@@ -81,28 +83,30 @@ Important response fields:
 - `best_success`: largest successful trial by `payload_bits_exact`
 - `trials`: one structured result per candidate
 - `payload_bits_exact`: main capacity metric
-- `header_bits`: protocol overhead, currently `16`
-- `total_target_bits`: `payload_bits_exact + header_bits`
-- `total_used_bits`: framed bits actually embedded
+- `header_bits`: compatibility field, currently `0`
+- `total_target_bits`: same as `payload_bits_exact`
+- `total_used_bits`: raw payload bits actually embedded
 - `failure_reason`: `truncated`, `insufficient_used_bits`, `word_limit_exceeded`, `quality_gate_failed`, `decode_failed`, or `payload_mismatch`
 
 ## `POST /hide`
 
-Legacy convenience endpoint for UTF-8 text secrets.
+Convenience endpoint for UTF-8 text secrets.
 
 `/hide` is still useful for manual roundtrips, but it is not the canonical fair-capacity endpoint because it takes UTF-8 text rather than arbitrary candidate bit lengths.
 
 Important response accounting:
 
-- `payload_bits`: UTF-8 payload bits, excluding the header
-- `header_bits`: protocol overhead
-- `target_bits` / `total_target_bits`: framed target bits, including the header
-- `used_bits` / `total_used_bits`: framed bits embedded by the encoder
+- `payload_bits`: UTF-8 payload bits
+- `header_bits`: compatibility field, currently `0`
+- `target_bits` / `total_target_bits`: raw payload target bits
+- `used_bits` / `total_used_bits`: raw payload bits embedded by the encoder
 - `quality_max_words`: hard accepted word ceiling
 
 ## `POST /reveal`
 
-Decodes a UTF-8 secret from stegotext. Prefer the token-stable path by passing `stego_token_ids` from `/hide`.
+Decodes a UTF-8 secret from stegotext. Prefer the token-stable path by passing `stego_token_ids` from `/hide`, and pass `/hide`'s `payload_bits` value as `payload_bits_len`.
+
+If `payload_bits_len` is omitted, the server tries the old 16-bit framed decode for legacy stegotext only.
 
 The response includes:
 
