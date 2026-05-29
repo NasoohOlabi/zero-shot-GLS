@@ -20,12 +20,13 @@ from dataclasses import asdict
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
-from starlette.responses import PlainTextResponse, Response
+from starlette.responses import HTMLResponse, PlainTextResponse, Response
 
 os.environ["HF_HOME"] = f"{osp.dirname(__file__)}/../tmp_saves/hg_cache"
 sys.path.append(f"{osp.dirname(osp.abspath(__file__))}/../src")
 
 import hide_extract
+from zgls_trace import generate_generation_trace, render_generation_trace_html
 from zgls_api import (
     CapacityProbeResult,
     EGSParams,
@@ -301,6 +302,30 @@ class CapacityProbeResponse(BaseModel):
     params_used: dict
 
 
+class GenerationTraceRequest(BaseModel):
+    prompt: str = Field(
+        ...,
+        min_length=1,
+        description="Complete prompt/context to trace.",
+        examples=[
+            "/no_think\nWrite exactly one short, natural movie-review sentence.\nOutput only the sentence.\nExamples:\nThe acting was uneven, but the ending still worked.\nI liked the premise more than the execution.\nNew sentence:"
+        ],
+    )
+    secret: str = Field(..., min_length=1, description="Secret text to hide and trace as UTF-8 bits.")
+    threshold: float | None = Field(default=None, gt=0, lt=1)
+    temperature: float | None = Field(default=None, gt=0, le=5)
+    temperature_alpha: float | None = Field(default=None, gt=0, le=10)
+    max_bpw: int | None = Field(default=None, ge=1, le=16)
+    max_new_tokens: int | None = Field(default=None, ge=1, le=4096)
+    max_steps: int = Field(default=64, ge=1, le=512)
+    candidates_shown: int | None = Field(
+        default=None,
+        ge=1,
+        le=10000,
+        description="Optional cap on shown post-threshold candidates per step. Omit for full pruned distribution.",
+    )
+
+
 def _http_error(e: ZGLSError) -> HTTPException:
     return HTTPException(status_code=e.status_code, detail=e.detail)
 
@@ -495,6 +520,38 @@ def _help_payload(cfg: ZGLSConfig, client: ZGLSClient) -> dict:
                     "500": "Unexpected backend/server failure.",
                 },
             },
+            "POST /generation_trace.html": {
+                "purpose": (
+                    "Generate a self-contained HTML explanation of one headerless /hide run, "
+                    "showing every token-selection step, pretext, post-threshold distribution, "
+                    "Huffman code table, selected token, consumed bits, and selection reason."
+                ),
+                "request_model": "GenerationTraceRequest",
+                "response_model": "text/html",
+                "request_schema": _model_schema(GenerationTraceRequest),
+                "example_request": {
+                    "prompt": (
+                        "/no_think\n"
+                        "Write exactly one short, natural movie-review sentence.\n"
+                        "Output only the sentence.\n"
+                        "Examples:\n"
+                        "The acting was uneven, but the ending still worked.\n"
+                        "I liked the premise more than the execution.\n"
+                        "New sentence:"
+                    ),
+                    "secret": "A",
+                    "threshold": 0.005,
+                    "temperature": 1.0,
+                    "temperature_alpha": 1.25,
+                    "max_bpw": 5,
+                    "max_new_tokens": 64,
+                    "max_steps": 32,
+                },
+                "common_errors": {
+                    "400": "Invalid prompt, secret, or trace bounds.",
+                    "500": "Unexpected backend/server failure.",
+                },
+            },
             "GET /docs": {
                 "purpose": "FastAPI Swagger UI generated from the same request/response models.",
             },
@@ -678,6 +735,39 @@ def build_app(cfg: ZGLSConfig) -> FastAPI:
     @app.get("/help.md", response_class=PlainTextResponse)
     def help_markdown():
         return _help_markdown(_help_payload(cfg, client))
+
+    @app.post(
+        "/generation_trace.html",
+        response_class=HTMLResponse,
+        summary="Trace one token-by-token ZGLS generation",
+        response_description="Self-contained HTML report.",
+    )
+    def generation_trace_html(req: GenerationTraceRequest):
+        try:
+            trace = generate_generation_trace(
+                model=client.model,
+                tokenizer=client.tokenizer,
+                prompt=req.prompt,
+                secret=req.secret,
+                threshold=cfg.egs.threshold if req.threshold is None else float(req.threshold),
+                temperature=cfg.egs.temperature if req.temperature is None else float(req.temperature),
+                temperature_alpha=(
+                    cfg.egs.temperature_alpha
+                    if req.temperature_alpha is None
+                    else float(req.temperature_alpha)
+                ),
+                max_bpw=cfg.egs.max_bpw if req.max_bpw is None else int(req.max_bpw),
+                max_new_tokens=(
+                    cfg.max_new_tokens if req.max_new_tokens is None else int(req.max_new_tokens)
+                ),
+                max_steps=int(req.max_steps),
+                candidates_shown=req.candidates_shown,
+            )
+            return render_generation_trace_html(trace)
+        except ZGLSError as e:
+            raise _http_error(e) from e
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"generation trace failed: {e}") from e
 
     @app.post("/hide", response_model=HideResponse)
     def hide(req: HideRequest):
