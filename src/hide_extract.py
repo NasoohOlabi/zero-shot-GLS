@@ -179,7 +179,7 @@ def hide_bits_with_prompt_ids_by_egs(
         else:
             raise NotImplementedError(f"Unknown mode: {mode}")
 
-    ppl = 2 ** (sum(nll_list) / len(nll_list))
+    ppl = 2 ** (sum(nll_list) / len(nll_list)) if nll_list else 1.0
 
     if complete_sent:
         return search.enhanced_greedy_search_end(model, cur_ids), is_truncated, bs.pos, ppl

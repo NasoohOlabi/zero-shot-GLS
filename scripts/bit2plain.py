@@ -79,10 +79,10 @@ def parse_args():
         help="Number of size bits.",
     )
     parser.add_argument(
-        "--ef-rounds",
+        "--ef-bits",
         type=int,
         default=4,
-        help="Number of EF rounds.",
+        help="Number of EF selector bits.",
     )
     ####################
     #                  #
@@ -95,7 +95,7 @@ def parse_args():
         args.output
     ), f"{args.output} already exists. Use --force to overwrite."
     assert args.size_bits > 0, f"--size-bits must be greater than 0."
-    assert args.ef_rounds >= 0, f"--ef-rounds must be greater than or equal to 0."
+    assert args.ef_bits >= 0, f"--ef-bits must be greater than or equal to 0."
 
     return args
 
@@ -106,7 +106,7 @@ def decode(
     tokenizer: GPT2Tokenizer,
     bs_base64: str,
     size_bits: int,
-    ef_rounds: int,
+    ef_bits: int,
     sentence_id: int | None = None,
 ) -> str | None:
     """decode plaintext from bitstring.
@@ -123,7 +123,7 @@ def decode(
     """
     # decode base64
     bs = codec.base642bits(bs_base64)
-    bs = codec.unwrap_bits(bs, size_bits=size_bits, ef_rounds=ef_rounds)
+    bs = codec.unwrap_bits(bs, size_bits=size_bits, ef_bits=ef_bits)
     try:
         token_ids = codec.decode_bitstream(model, bs, remove_bos_token=True)  # [1, seq_len]
         # decode token_ids
@@ -147,7 +147,7 @@ if __name__ == "__main__":
     #                 #
     ###################
     logging.info(f"Loading input data: {args.input}.")
-    with open(args.input, "r") as fp:
+    with open(args.input, "r", encoding="utf-8") as fp:
         reader = csv.DictReader(fp)
         input_fieldnames = list(reader.fieldnames)
         input_data: list[dict[str, Any]] = list(reader)
@@ -173,9 +173,8 @@ if __name__ == "__main__":
     #                     #
     #######################
     logging.info("Loading GPT-2 model.")
-    model = GPT2LMHeadModel.from_pretrained(
-        "gpt2-medium", device_map=0, local_files_only=True
-    )  # move to GPU:0
+    model = GPT2LMHeadModel.from_pretrained("gpt2-medium", local_files_only=False)
+    model.to("cpu")
     model.eval()
     logging.info("Loading GPT-2 tokenizer.")
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2-medium")
@@ -188,7 +187,7 @@ if __name__ == "__main__":
         logging.warning(f"Overwriting output file.")
     logging.info(f"Decode plaintext from bitstring. Output file: {args.output}.")
     os.makedirs(osp.dirname(osp.abspath(args.output)), exist_ok=True)
-    with open(args.output, "w") as fp:
+    with open(args.output, "w", encoding="utf-8", newline="") as fp:
         writer = csv.DictWriter(fp, fieldnames=input_fieldnames + [args.dst_col])
         writer.writeheader()
         for row in tqdm(input_data[start_idx:end_idx], desc="Bits-To-Plain", dynamic_ncols=True):
@@ -197,7 +196,7 @@ if __name__ == "__main__":
                 tokenizer,
                 row[args.src_col],
                 size_bits=args.size_bits,
-                ef_rounds=args.ef_rounds,
+                ef_bits=args.ef_bits,
                 sentence_id=row.get("sentence_id"),
             )
             row[args.dst_col] = dec_plaintext

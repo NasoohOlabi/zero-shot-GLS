@@ -106,6 +106,42 @@ def enhanced_greedy_search(
     assert input_ids.dim() == 2
     assert input_ids.size(0) == 1, "Only support batch size 1."
 
+    # Backend 1: llama.cpp server wrapper (see `src/llama_server.py`)
+    if hasattr(model, "next_token_top_logprobs"):
+        top = model.next_token_top_logprobs(input_ids=input_ids, temperature=temperature)
+        # filter ignored ids
+        top = [(tid, p) for (tid, p) in top if tid not in ignored_ids]
+        if len(top) == 0:
+            # extremely unlikely; fall back to something deterministic
+            top = [(0, 1e-12)]
+
+        if logits_offset is not None:
+            adjusted_top = []
+            for tid, prob in top:
+                # Approximate repeat penalty in server mode by applying a logit delta
+                # to available candidate ids before ranking.
+                p = max(float(prob), 1e-12)
+                adj = float(torch.exp(torch.log(torch.tensor(p)) + logits_offset[tid]).item())
+                adjusted_top.append((tid, max(adj, 1e-12)))
+            top = adjusted_top
+
+        # Ensure deterministic ordering in case of (near-)ties.
+        top.sort(key=lambda x: (-x[1], x[0]))
+
+        probs = torch.tensor([p for (_, p) in top], dtype=torch.float64, device=input_ids.device)
+        ids = torch.tensor([tid for (tid, _) in top], dtype=torch.long, device=input_ids.device)
+
+        # determine truncation count based on threshold
+        less_thres_cnt = torch.tensor(int((probs >= threshold).sum().item()), dtype=torch.long)
+        raw_trunc_cnt = torch.maximum(less_thres_cnt, torch.ones_like(less_thres_cnt))
+        raw_trunc_cnt = torch.minimum(raw_trunc_cnt, (2 * torch.ones_like(raw_trunc_cnt)) ** max_bits_len)
+        trunc_bits = torch.floor(torch.log2(raw_trunc_cnt.float())).long()
+
+        k = int(raw_trunc_cnt.item())
+        ret_ids = torch.cat([input_ids.repeat(k, 1), ids[:k, None]], dim=-1)
+        return {"comb_ids": ret_ids, "trunc_bits": trunc_bits, "sorted_probs": probs[:k]}
+
+    # Backend 2: HuggingFace transformers model (original behavior)
     logits: torch.Tensor = model(input_ids=input_ids).logits[0, -1]  # (vocab_size)
     logits = logits.double()
     logits /= temperature

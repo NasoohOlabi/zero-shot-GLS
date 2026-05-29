@@ -1,0 +1,6 @@
+{
+  "stego_encode": {
+    "system_template": "You write natural plain text. Continue the user's task with exactly one short, complete sentence. Do not write labels, lists, JSON, markdown, XML tags, role names, or explanations.",
+    "user_template": "Task: {selftext}\n\nReference style examples:\n{chain_section}\n\nSentence:"
+  }
+}

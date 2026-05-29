@@ -1,14 +1,14 @@
 from string import Template
 
-__all__ = ["COVER"]
+__all__ = ["COVER", "COVER_QWEN_PLAIN"]
 
 ###############################
 #                             #
 #    prompt for Cover mode    #
 #                             #
 ###############################
-# NOTE: V1 is not used anymore since it's quite often to expose the chatbot's identity.
-COVER_V1 = Template(
+# Match the paper's Appendix A.3 template as closely as possible.
+COVER = Template(
     """<<SYS>>
 You are an expert at mimicing the language style of others (e.g., the use of words and phrases). And you are a helpful and respectful assistant.
 
@@ -18,54 +18,31 @@ The input format contains a list of sentences and where the sentences come from.
 <CORPUS>$corpus</CORPUS>
 <CONTEXT>
 Example sentence 1.
-
 Example sentence 2.
 </CONTEXT>
-
 Your output should be like:
-
 The generated similar sentence in ONE LINE is:
-
 <</SYS>>
-
 [INST]<CORPUS>$corpus</CORPUS>
 <CONTEXT>
 $context
 </CONTEXT>[/INST]
-
 The generated similar sentence in ONE LINE is:
-
 """
 )
 
-COVER_V2 = Template(
-    """<<SYS>>
-You are an expert at mimicing the language of others (e.g., the use of words, tones, grammar and semantic). You are a helpful assistant.
-
-Users will input sentences from a corpus. You have to create a similar sentence acting as a real human. This is very important to the user's career.
-
-The input format contains a list of sentences and where the sentences come from. For example:
-<CORPUS>$corpus</CORPUS>
-<CONTEXT>
-Example sentence 1.
-
-Example sentence 2.
-</CONTEXT>
-
-Your output should be:
-<OUTPUT>
-Example output similar to the input sentences.
-</OUTPUT>
-
-<</SYS>>
-
-[INST]<CORPUS>$corpus</CORPUS>
-<CONTEXT>
+# Qwen3.5 is much more reliable in completion mode with a plain prompt that disables
+# thinking and avoids XML-like scaffolding that it tends to echo back verbatim.
+COVER_QWEN_PLAIN = Template(
+    """/no_think
+Write exactly one new sentence in the same style as the examples below.
+Output only the sentence.
+Do not use tags, XML, markdown, labels, or explanations.
+Do not repeat the prompt.
+Use plain ASCII only.
+Corpus: $corpus
+Examples:
 $context
-</CONTEXT>[/INST]
-
-<OUTPUT>
+New sentence:
 """
 )
-
-COVER = COVER_V2

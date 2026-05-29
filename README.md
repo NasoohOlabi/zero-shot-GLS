@@ -33,6 +33,12 @@ ln -s $SHARE_FOLDER/datasets/imdb datasets/imdb
 ln -s $SHARE_FOLDER/datasets/twitter datasets/twitter
 ```
 
+### Backend compatibility
+
+For fair reproduction of the paper's stage2/stage3 hiding and extraction pipeline, the backend
+must expose tokenization, detokenization, and token-level next-token top-logprobs. An
+OpenAI-compatible local server alone is not enough if it omits those lower-level capabilities.
+
 ## Datasets
 
 Check [datasets/](datasets/README.md) section for details.
@@ -41,9 +47,111 @@ Check [datasets/](datasets/README.md) section for details.
 
 See [scripts/](scripts/README.md) section for details.
 
+### Python API
+
+The reusable ZGLS API lives in `src/zgls_api.py`. It wraps the llama-server backed
+hide/reveal pipeline used by the HTTP server.
+
+```powershell
+$env:PYTHONPATH="src"
+@'
+from zgls_api import ZGLSClient, ZGLSConfig
+
+client = ZGLSClient(ZGLSConfig(
+    server_url="http://127.0.0.1:8081",
+    server_model="Qwen3.5-9B-Q4_K_M.gguf",
+    corpus="IMDB_about_movies",
+))
+
+cover = [
+    "I expected this film to be better than it was.",
+    "The performances were strong but the pacing felt uneven.",
+]
+hidden = client.hide(
+    prompt="Write one natural short sentence about coffee.",
+    secret="hello",
+    cover_texts=cover,
+)
+revealed = client.reveal(
+    prompt="Write one natural short sentence about coffee.",
+    stegotext=hidden.stegotext,
+    context_seed=hidden.context_seed,
+    effective_prompt_hash=hidden.effective_prompt_hash,
+    stego_token_ids=hidden.stego_token_ids,
+    cover_texts=cover,
+)
+print(hidden.stegotext)
+print(revealed.secret)
+'@ | .\.venv\Scripts\python.exe -
+```
+
+### HTTP API
+
+Run the FastAPI service from PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\stego_api_server.py `
+  --host 127.0.0.1 `
+  --port 9000 `
+  --server-url http://127.0.0.1:8081 `
+  --server-model Qwen3.5-9B-Q4_K_M.gguf `
+  --corpus IMDB_about_movies
+```
+
+Then call `/hide` and `/reveal` as documented in `docs/STEGO_API_SERVER.md`.
+
 ## Evaluation
 
 For details of metrics, steganalysis, and language evaluation, check [evaluate/](evaluate/README.md) section.
+
+Generate confidence-oriented samples:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\generate_zgls_metric_samples.py `
+  --server-url http://127.0.0.1:8081 `
+  --server-model Qwen3.5-9B-Q4_K_M.gguf `
+  --cover-path datasets\imdb\imdb.csv `
+  --cover-col plaintext `
+  --corpus IMDB_about_movies `
+  --min-samples 100 `
+  --max-samples 2000 `
+  --kld-cover-limit 1000 `
+  --output-dir tmp_saves\runs\zgls_metric_samples `
+  --force
+```
+
+Compute PPL and KLD summaries:
+
+```powershell
+.\.venv\Scripts\python.exe evaluate\ppl.py tmp_saves\runs\zgls_metric_samples\samples.csv `
+  --ppl-col ppl `
+  --output tmp_saves\runs\zgls_metric_samples\ppl.json `
+  --force
+
+.\.venv\Scripts\python.exe evaluate\kld.py `
+  tmp_saves\runs\zgls_metric_samples\samples.csv `
+  datasets\imdb\imdb.csv `
+  --stego-col stegotext `
+  --cover-col plaintext `
+  --server-url http://127.0.0.1:8081 `
+  --server-model Qwen3.5-9B-Q4_K_M.gguf `
+  --output tmp_saves\runs\zgls_metric_samples\kld.json `
+  --force
+```
+
+Run local metric tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_metrics.py
+```
+
+Run real llama-server integration tests:
+
+```powershell
+$env:ZGLS_SERVER_URL="http://127.0.0.1:8081"
+$env:ZGLS_SERVER_MODEL="Qwen3.5-9B-Q4_K_M.gguf"
+.\.venv\Scripts\python.exe -m pytest tests\test_real_llama_api.py
+```
 
 ## Reference
 

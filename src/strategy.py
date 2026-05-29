@@ -39,7 +39,9 @@ class TemperatureAlphaStrategy(StrategyBase):
         }
 
     def update(self, new_ids_choice_cnt: int | None = None):
-        if new_ids_choice_cnt is None or new_ids_choice_cnt > 1:
+        # Paper behavior: raise temperature only after trivial candidate sets (|c| == 1),
+        # otherwise reset to the starting temperature.
+        if new_ids_choice_cnt == 1:
             self.cur_temp *= self.alpha
         else:
             self.cur_temp = self.start_temp

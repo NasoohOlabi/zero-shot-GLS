@@ -169,7 +169,7 @@ if __name__ == "__main__":
     #                 #
     ###################
     logging.info(f"Loading input data: {args.input}.")
-    with open(args.input, "r") as fp:
+    with open(args.input, "r", encoding="utf-8") as fp:
         reader = csv.DictReader(fp)
         input_fieldnames = list(reader.fieldnames)
         input_data: list[dict[str, Any]] = list(reader)
@@ -195,9 +195,8 @@ if __name__ == "__main__":
     #                     #
     #######################
     logging.info("Loading GPT-2 model.")
-    model = GPT2LMHeadModel.from_pretrained(
-        "gpt2-medium", device_map=0, local_files_only=True
-    )  # move to GPU:0
+    model = GPT2LMHeadModel.from_pretrained("gpt2-medium", local_files_only=False)
+    model.to("cpu")
     model.eval()
     logging.info("Loading GPT-2 tokenizer.")
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2-medium")
@@ -212,7 +211,7 @@ if __name__ == "__main__":
     os.makedirs(osp.dirname(osp.abspath(args.output)), exist_ok=True)
     # additional col for bs w/o EF coding
     ex_dst_col = f"{args.dst_col}_wo_ef"
-    with open(args.output, "w") as fp:
+    with open(args.output, "w", encoding="utf-8", newline="") as fp:
         writer = csv.DictWriter(fp, fieldnames=input_fieldnames + [args.dst_col, ex_dst_col])
         writer.writeheader()
         for row in tqdm(input_data[start_idx:end_idx], desc="Plain-To-Bits", dynamic_ncols=True):

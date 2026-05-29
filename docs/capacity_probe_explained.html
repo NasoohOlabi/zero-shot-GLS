@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Capacity Probe Explained</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17202a;
+      --muted: #5b6776;
+      --line: #d9e1ea;
+      --paper: #ffffff;
+      --soft: #f5f7fa;
+      --accent: #176b87;
+      --accent-2: #0f8b6f;
+      --fail: #b93838;
+      --warn: #946200;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      line-height: 1.55;
+      color: var(--ink);
+      background: var(--soft);
+    }
+
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 32px 18px 56px;
+    }
+
+    header {
+      padding: 28px 0 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: 1.2;
+      margin: 0 0 12px;
+    }
+
+    h1 {
+      font-size: 34px;
+    }
+
+    h2 {
+      margin-top: 34px;
+      font-size: 24px;
+    }
+
+    h3 {
+      margin-top: 20px;
+      font-size: 18px;
+    }
+
+    p {
+      margin: 0 0 14px;
+    }
+
+    code,
+    pre {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 14px;
+    }
+
+    pre {
+      overflow: auto;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #101820;
+      color: #f5fbff;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      background: var(--paper);
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #eaf1f6;
+      font-weight: 700;
+    }
+
+    .panel {
+      padding: 18px;
+      margin: 18px 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper);
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .metric {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper);
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 24px;
+      color: var(--accent);
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .ok {
+      color: var(--accent-2);
+      font-weight: 700;
+    }
+
+    .fail {
+      color: var(--fail);
+      font-weight: 700;
+    }
+
+    .warn {
+      color: var(--warn);
+      font-weight: 700;
+    }
+
+    .formula {
+      padding: 14px 16px;
+      border-left: 4px solid var(--accent);
+      background: #eef7fa;
+      font-family: Consolas, "Courier New", monospace;
+    }
+
+    @media (max-width: 720px) {
+      h1 {
+        font-size: 28px;
+      }
+
+      .summary {
+        grid-template-columns: 1fr;
+      }
+
+      th,
+      td {
+        padding: 8px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Capacity Probe, Explained Simply</h1>
+      <p class="muted">
+        In this project, the capacity probe answers one question: how many secret payload bits can ZGLS hide in one natural-looking short text while still recovering them exactly?
+      </p>
+    </header>
+
+    <section>
+      <h2>The Main Idea</h2>
+      <p>
+        Think of the generated comment as a small container. The capacity probe tries different secret sizes, such as 1 bit, 2 bits, 4 bits, 8 bits, 16 bits, and so on. For each size, it asks:
+      </p>
+      <div class="panel">
+        <p>Can we hide this many payload bits, keep the visible text under the word limit, pass the quality check, then extract exactly the same bits back?</p>
+      </div>
+      <p>
+        The capacity score is the largest payload size that succeeds. In the API response, that number is <code>best_success.payload_bits_exact</code>.
+      </p>
+    </section>
+
+    <section>
+      <h2>Payload Bits vs. Header Bits</h2>
+      <p>
+        ZGLS adds a small 16-bit header before the actual secret payload. The header tells the decoder how long the payload is. That header is necessary for decoding, but it is not counted as the research capacity score.
+      </p>
+      <div class="formula">
+        total_target_bits = payload_bits_exact + header_bits
+      </div>
+      <p>
+        So if the probe successfully hides <code>16</code> payload bits, the encoder actually tries to embed:
+      </p>
+      <div class="formula">
+        16 payload bits + 16 header bits = 32 total target bits
+      </div>
+      <p>
+        For fair comparison, report <code>payload_bits_exact</code> as capacity. Treat <code>total_target_bits</code> and <code>total_used_bits</code> as diagnostics.
+      </p>
+    </section>
+
+    <section>
+      <h2>Concrete Example</h2>
+      <p>
+        Suppose we want a natural movie comment with at most 40 words. We ask the probe to try these payload sizes:
+      </p>
+      <pre><code>[1, 2, 4, 8, 12, 16, 24, 32, 48, 64]</code></pre>
+
+      <h3>Example request</h3>
+      <pre><code>{
+  "prompt": "You are writing natural short movie comments.\n\nExamples:\n- The acting was strong but the pacing felt uneven.\n- It had a few nice scenes, though the ending felt rushed.\n\nWrite one new natural short movie comment.",
+  "max_words": 40,
+  "quality_max_retries": 6,
+  "payload_bits_candidates": [1, 2, 4, 8, 12, 16, 24, 32, 48, 64],
+  "complete_sent": true,
+  "max_new_tokens": 64,
+  "threshold": 0.005,
+  "temperature": 1.0,
+  "temperature_alpha": 1.25,
+  "max_bpw": 2
+}</code></pre>
+
+      <h3>Imaginary trial results</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Candidate payload</th>
+            <th>Total target bits</th>
+            <th>Generated comment</th>
+            <th>Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>8 bits</td>
+            <td>8 + 16 = 24 bits</td>
+            <td>"The cast is charming, though the story feels a little thin near the end."</td>
+            <td><span class="ok">Success</span></td>
+          </tr>
+          <tr>
+            <td>16 bits</td>
+            <td>16 + 16 = 32 bits</td>
+            <td>"The performances carry it well, but the final act wraps things up too quickly."</td>
+            <td><span class="ok">Success</span></td>
+          </tr>
+          <tr>
+            <td>24 bits</td>
+            <td>24 + 16 = 40 bits</td>
+            <td>"It has some memorable scenes, but the pacing drifts before the ending lands."</td>
+            <td><span class="fail">Fail</span>: payload mismatch</td>
+          </tr>
+          <tr>
+            <td>32 bits</td>
+            <td>32 + 16 = 48 bits</td>
+            <td>"The movie looks great and starts strongly, but it loses focus halfway through."</td>
+            <td><span class="fail">Fail</span>: insufficient used bits</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="summary">
+        <div class="metric">
+          <strong>16</strong>
+          payload bits encoded
+        </div>
+        <div class="metric">
+          <strong>16</strong>
+          header bits
+        </div>
+        <div class="metric">
+          <strong>32</strong>
+          total target bits
+        </div>
+      </div>
+
+      <p>
+        In this example, the capacity is <code>16</code> bits, because 16 is the largest payload candidate that succeeded. The 24-bit candidate failed, so we do not claim 24 bits of capacity.
+      </p>
+    </section>
+
+    <section>
+      <h2>What Counts As Success?</h2>
+      <p>A trial only succeeds when every condition below is true:</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Check</th>
+            <th>Meaning</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Fully embedded</td>
+            <td>The generated text carried the whole framed bitstream: header plus payload.</td>
+          </tr>
+          <tr>
+            <td>Word limit passed</td>
+            <td>The visible generated text has <code>word_count &lt;= max_words</code>.</td>
+          </tr>
+          <tr>
+            <td>Quality gate passed</td>
+            <td>The comment is acceptable according to the project quality checks.</td>
+          </tr>
+          <tr>
+            <td>Extraction succeeded</td>
+            <td>The decoder could read bits back from the generated text or token ids.</td>
+          </tr>
+          <tr>
+            <td>Payload matched exactly</td>
+            <td>The recovered raw payload bits are identical to the original candidate bits.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Common Confusion</h2>
+      <div class="panel">
+        <p><span class="warn">Do not say capacity is 32 bits</span> in the 16-bit example just because <code>16 payload + 16 header = 32 total target bits</code>.</p>
+        <p>The fair capacity number is only the useful secret payload: <code>16</code> bits.</p>
+      </div>
+      <p>
+        A good report can still include the header and total bits, but label them clearly:
+      </p>
+      <pre><code>payload_bits_encoded: 16
+protocol_overhead_bits: 16
+total_embedded_bits: 32
+decode_ok: true</code></pre>
+    </section>
+  </main>
+</body>
+</html>

@@ -7,7 +7,13 @@ import torch
 import torch.nn.functional as F
 from bitstring import Bits, BitStream, ConstBitStream
 from transformers import GPT2LMHeadModel
-from zgls_utils import huffman
+
+# `zgls_utils` is an optional C++/pybind11 extension. On some Windows setups, building
+# native extensions is not available. Fall back to a pure-Python Huffman implementation.
+try:
+    from zgls_utils import huffman  # type: ignore
+except Exception:  # pragma: no cover - environment dependent
+    from huffman_py import huffman  # type: ignore
 
 THRES = 1e-8
 

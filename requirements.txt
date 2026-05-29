@@ -1,7 +1,13 @@
 bitstring==4.1.2
+fastapi
+numpy
 optimum==1.13.2
+pandas
 pre-commit==3.5.0
 pybind11==2.11.1
 pyfunctional==1.4.3
+pytest
+requests
 # torch==2.1.0+cu121
 transformers==4.38.0
+uvicorn

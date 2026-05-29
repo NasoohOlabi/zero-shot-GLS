@@ -33,6 +33,8 @@ import codec
 import hide_extract
 import prompt_gen
 from p_utils import seed_everything
+from llama_server import LlamaServerConfig, LlamaServerModel, LlamaServerTokenizer
+from llama_cpp_local import LlamaCppLocalConfig, LlamaCppLocalModel, LlamaCppLocalTokenizer
 
 
 def parse_args():
@@ -104,6 +106,13 @@ def parse_args():
         help="Force overwrite output file.",
     )
     parser.add_argument("--corpus", type=str, default="Unknown", help="Hint for corpus name.")
+    parser.add_argument(
+        "--prompt-style",
+        type=str,
+        default="auto",
+        choices=["auto", "paper", "qwen_plain"],
+        help="Prompt template style for cover prompt generation.",
+    )
     ###########################
     #                         #
     #    Generation Config    #
@@ -147,6 +156,34 @@ def parse_args():
         default=5,
         help="Max bits for each token (word) to hide.",
     )
+    ######################
+    #                    #
+    #      backend       #
+    #                    #
+    ######################
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="hf",
+        choices=["hf", "llama_server", "llama_cpp_local"],
+        help="LLM backend for stage3 decryption.",
+    )
+    parser.add_argument(
+        "--server-url",
+        type=str,
+        default="http://127.0.0.1:8081",
+        help="llama-server base URL when --backend=llama_server.",
+    )
+    parser.add_argument(
+        "--server-model",
+        type=str,
+        default="Qwen3.5-9B-Q4_K_M.gguf",
+        help="Model id/name as reported by llama-server /v1/models.",
+    )
+    parser.add_argument("--model-path", type=str, default="", help="GGUF path for llama_cpp_local.")
+    parser.add_argument("--n-ctx", type=int, default=4096, help="Context length for llama_cpp_local.")
+    parser.add_argument("--n-threads", type=int, default=8, help="CPU threads for llama_cpp_local.")
+    parser.add_argument("--n-gpu-layers", type=int, default=0, help="GPU layers for llama_cpp_local.")
     ####################
     #                  #
     #    validating    #
@@ -218,7 +255,7 @@ if __name__ == "__main__":
     #                 #
     ###################
     logging.info(f"Loading input data: {args.input}.")
-    with open(args.input, "r") as fp:
+    with open(args.input, "r", encoding="utf-8") as fp:
         reader = csv.DictReader(fp)
         input_fieldnames = list(reader.fieldnames)
         input_data: list[dict[str, Any]] = list(reader)
@@ -247,18 +284,40 @@ if __name__ == "__main__":
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.use_deterministic_algorithms(True, warn_only=True)
 
-    model_name = "TheBloke/Llama-2-7B-chat-GPTQ"
-    logging.info(f"Loading {model_name} tokenizer.")
-    tokenizer = LlamaTokenizer.from_pretrained(model_name, legacy=True)
-    logging.info(f"Loading {model_name} model.")
-    model = LlamaForCausalLM.from_pretrained(
-        model_name,
-        local_files_only=True,
-        trust_remote_code=False,
-        revision="main",
-        device_map=0,
-    )
+    if args.backend == "llama_server":
+        cfg = LlamaServerConfig(base_url=args.server_url, model=args.server_model)
+        logging.info(f"Using llama-server backend: {cfg.base_url} / model={cfg.model}")
+        model = LlamaServerModel(cfg)
+        tokenizer = LlamaServerTokenizer(model)
+        model_hint = args.server_model
+    elif args.backend == "llama_cpp_local":
+        assert args.model_path, "--model-path is required when --backend=llama_cpp_local."
+        cfg = LlamaCppLocalConfig(
+            model_path=args.model_path,
+            n_ctx=args.n_ctx,
+            n_threads=args.n_threads,
+            n_gpu_layers=args.n_gpu_layers,
+        )
+        logging.info(f"Using llama_cpp_local backend: {cfg.model_path}")
+        model = LlamaCppLocalModel(cfg)
+        tokenizer = LlamaCppLocalTokenizer(model)
+        model_hint = args.model_path
+    else:
+        model_name = "TheBloke/Llama-2-7B-chat-GPTQ"
+        logging.info(f"Loading {model_name} tokenizer.")
+        tokenizer = LlamaTokenizer.from_pretrained(model_name, legacy=True)
+        logging.info(f"Loading {model_name} model.")
+        model = LlamaForCausalLM.from_pretrained(
+            model_name,
+            local_files_only=True,
+            trust_remote_code=False,
+            revision="main",
+            device_map=0,
+        )
+        model_hint = model_name
     model.eval()
+    prompt_style = prompt_gen.resolve_prompt_style(args.prompt_style, model_hint=model_hint)
+    logging.info(f"Using prompt style: {prompt_style}")
     #################
     #               #
     #    bit dec    #
@@ -268,8 +327,11 @@ if __name__ == "__main__":
         logging.warning(f"Overwriting output file.")
     logging.info(f"Decrypt bitstring from stegotext. Output file: {args.output}.")
     os.makedirs(osp.dirname(osp.abspath(args.output)), exist_ok=True)
-    with open(args.output, "w") as fp, prompt_gen.gen_prompt_ctx(
-        mode=args.mode, cover=args.cover, cover_col=args.cover_col
+    with open(args.output, "w", encoding="utf-8", newline="") as fp, prompt_gen.gen_prompt_ctx(
+        mode=args.mode,
+        cover=args.cover,
+        cover_col=args.cover_col,
+        prompt_style=prompt_style,
     ) as gen_prompt:
         writer = csv.DictWriter(fp, fieldnames=input_fieldnames + [args.dst_col])
         writer.writeheader()
