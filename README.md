@@ -78,6 +78,7 @@ revealed = client.reveal(
     context_seed=hidden.context_seed,
     effective_prompt_hash=hidden.effective_prompt_hash,
     stego_token_ids=hidden.stego_token_ids,
+    payload_bits_len=hidden.payload_bits,
     cover_texts=cover,
 )
 print(hidden.stegotext)

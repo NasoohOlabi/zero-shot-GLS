@@ -8,6 +8,7 @@ one shared contract for configuration, hide/reveal calls, sampling, and metrics.
 from __future__ import annotations
 
 import csv
+import base64
 import hashlib
 import json
 import math
@@ -120,6 +121,12 @@ class HideResult:
     quality_metrics: dict[str, Any]
     mode: str
     params_used: dict[str, Any]
+    embedded_bits: int = 0
+    fully_embedded: bool = False
+    remaining_bits_len: int = 0
+    remaining_bits: str = ""
+    payload_base64: str | None = None
+    remaining_payload_base64: str | None = None
 
 
 @dataclass
@@ -334,26 +341,88 @@ def bytes_to_bits(raw: bytes) -> str:
     return "".join(f"{b:08b}" for b in raw)
 
 
+def bytes_to_base64(raw: bytes) -> str:
+    return base64.b64encode(raw).decode("ascii")
+
+
+def base64_to_bytes(payload_base64: str) -> bytes:
+    if not isinstance(payload_base64, str):
+        raise ZGLSError("payload_base64 must be a string", status_code=400)
+    try:
+        raw = base64.b64decode(payload_base64.encode("ascii"), validate=True)
+    except Exception as e:
+        raise ZGLSError(f"payload_base64 decode failed: {e}", status_code=400) from e
+    if not raw:
+        raise ZGLSError("payload_base64 must not decode to empty bytes", status_code=400)
+    return raw
+
+
+def payload_bytes_to_bits(raw: bytes) -> ConstBitStream:
+    if not raw:
+        raise ZGLSError("payload bytes must not be empty", status_code=400)
+    payload_bits = bytes_to_bits(raw)
+    if len(payload_bits) > MAX_PAYLOAD_BITS:
+        raise ZGLSError(
+            f"payload too large: {len(raw)} bytes ({len(payload_bits)} bits, max={MAX_PAYLOAD_BITS} bits)",
+            status_code=400,
+        )
+    return payload_bits_to_bits(payload_bits)
+
+
+def bit_string_to_base64_bytes(bit_string: str) -> str | None:
+    if len(bit_string) % 8 != 0:
+        return None
+    raw = bytes(int(bit_string[idx : idx + 8], 2) for idx in range(0, len(bit_string), 8))
+    return bytes_to_base64(raw)
+
+
 def payload_bits_to_bits(payload_bits: str) -> ConstBitStream:
     return ConstBitStream(bin=validate_payload_bits(payload_bits))
 
 
 def payload_to_bits(secret: str) -> ConstBitStream:
     raw = secret.encode("utf-8")
-    if not raw:
-        raise ZGLSError("secret must not be empty", status_code=400)
-    payload_bits = bytes_to_bits(raw)
-    if len(payload_bits) > MAX_PAYLOAD_BITS:
-        raise ZGLSError(
-            f"secret too large: {len(raw)} bytes ({len(payload_bits)} bits, max={MAX_PAYLOAD_BITS} bits)",
-            status_code=400,
-        )
-    return payload_bits_to_bits(payload_bits)
+    try:
+        return payload_bytes_to_bits(raw)
+    except ZGLSError as exc:
+        if not raw:
+            raise ZGLSError("secret must not be empty", status_code=400) from exc
+        raise
 
 
 def payload_to_framed_bits(secret: str) -> ConstBitStream:
     raw_bits = payload_to_bits(secret).bin
     return payload_bits_to_framed_bits(raw_bits)
+
+
+def hide_payload_to_bits(
+    *,
+    secret: str | None = None,
+    payload_base64: str | None = None,
+    payload_bits: str | None = None,
+) -> tuple[ConstBitStream, int, str | None]:
+    provided = [
+        secret is not None,
+        payload_base64 is not None,
+        payload_bits is not None,
+    ]
+    if sum(provided) != 1:
+        raise ZGLSError(
+            "provide exactly one of secret, payload_base64, or payload_bits",
+            status_code=400,
+        )
+
+    if secret is not None:
+        raw = secret.encode("utf-8")
+        return payload_bytes_to_bits(raw), len(raw), bytes_to_base64(raw)
+
+    if payload_base64 is not None:
+        raw = base64_to_bytes(payload_base64)
+        return payload_bytes_to_bits(raw), len(raw), bytes_to_base64(raw)
+
+    assert payload_bits is not None
+    bits = payload_bits_to_bits(payload_bits)
+    return bits, math.ceil(len(bits) / 8), bit_string_to_base64_bytes(bits.bin)
 
 
 def bits_to_payload_bits(bits: ConstBitStream, payload_bits_len: int) -> tuple[str, int]:
@@ -804,7 +873,9 @@ class ZGLSClient:
         self,
         *,
         prompt: str,
-        secret: str,
+        secret: str | None = None,
+        payload_base64: str | None = None,
+        payload_bits: str | None = None,
         complete_sent: bool = False,
         cover_texts: list[str] | None = None,
         corpus: str | None = None,
@@ -817,11 +888,16 @@ class ZGLSClient:
         temperature: float | None = None,
         temperature_alpha: float | None = None,
         max_bpw: int | None = None,
+        allow_partial: bool = False,
+        enforce_quality: bool = True,
     ) -> HideResult:
-        bits = payload_to_bits(secret)
+        bits, payload_bytes, normalized_payload_base64 = hide_payload_to_bits(
+            secret=secret,
+            payload_base64=payload_base64,
+            payload_bits=payload_bits,
+        )
         target_bits = int(len(bits))
         payload_bits_len = target_bits
-        payload_bytes = len(secret.encode("utf-8"))
         egs_params = replace(
             self.cfg.egs,
             threshold=self.cfg.egs.threshold if threshold is None else float(threshold),
@@ -888,17 +964,20 @@ class ZGLSClient:
             stego_token_ids = encoded_out_ids[0, prompt_len:].tolist()
             stegotext = self.tokenizer.decode(display_token_ids)
             metrics = repetition_metrics(stegotext)
-            decode_ready = int(used_bits) >= target_bits
+            embedded_bits = min(int(used_bits), target_bits)
+            remaining_bits = bits[embedded_bits:target_bits].bin
+            decode_ready = embedded_bits >= target_bits
+            quality_ok = quality_pass(
+                metrics,
+                min_words=self.cfg.quality_min_words,
+                max_words=configured_max_words,
+                max_repetition_ratio=self.cfg.quality_max_repetition_ratio,
+                max_single_token_share=self.cfg.quality_max_single_token_share,
+            )
             passed = (
                 (not bool(is_truncated))
                 and decode_ready
-                and quality_pass(
-                    metrics,
-                    min_words=self.cfg.quality_min_words,
-                    max_words=configured_max_words,
-                    max_repetition_ratio=self.cfg.quality_max_repetition_ratio,
-                    max_single_token_share=self.cfg.quality_max_single_token_share,
-                )
+                and (quality_ok or not enforce_quality)
             )
             bpw_estimate = int(used_bits) / max(1, int(metrics["word_count"]))
             candidate = HideResult(
@@ -934,10 +1013,22 @@ class ZGLSClient:
                     "quality_max_retries": effective_quality_max_retries,
                     "quality_min_words": self.cfg.quality_min_words,
                     "quality_max_words": configured_max_words,
+                    "allow_partial": allow_partial,
+                    "enforce_quality": enforce_quality,
                 },
+                embedded_bits=embedded_bits,
+                fully_embedded=decode_ready,
+                remaining_bits_len=len(remaining_bits),
+                remaining_bits=remaining_bits,
+                payload_base64=normalized_payload_base64,
+                remaining_payload_base64=bit_string_to_base64_bytes(remaining_bits),
             )
             best_result = candidate
             if passed:
+                return candidate
+            if allow_partial and (is_truncated or not decode_ready):
+                return candidate
+            if decode_ready and not enforce_quality:
                 return candidate
             if is_truncated:
                 last_fail_reason = "truncated"
@@ -1377,6 +1468,7 @@ class ZGLSClient:
                         cover_texts=sample_cfg.cover_texts,
                         corpus=sample_cfg.corpus,
                         stego_token_ids=hidden.stego_token_ids,
+                        payload_bits_len=hidden.payload_bits,
                     )
                     row.update(asdict(hidden))
                     row.update(

@@ -90,9 +90,19 @@ Important response fields:
 
 ## `POST /hide`
 
-Convenience endpoint for UTF-8 text secrets.
+Encodes caller-supplied payload into next-token generation from the exact prompt you send.
+Put examples, context, and instructions directly in `prompt`; the server does not own or
+rewrite the prompt.
 
-`/hide` is still useful for manual roundtrips, but it is not the canonical fair-capacity endpoint because it takes UTF-8 text rather than arbitrary candidate bit lengths.
+Provide exactly one payload field:
+
+- `secret`: UTF-8 text, kept for compatibility
+- `payload_base64`: raw payload bytes encoded as base64
+- `payload_bits`: raw bits, useful for continuing a non-byte-aligned remainder
+
+For raw payload requests, partial output is returned by default when the token budget ends
+before the full payload is embedded. Continue with `remaining_bits` if `remaining_bits_len`
+is non-zero. `remaining_payload_base64` is present only when the remainder is byte-aligned.
 
 Important response accounting:
 
@@ -100,6 +110,9 @@ Important response accounting:
 - `header_bits`: compatibility field, currently `0`
 - `target_bits` / `total_target_bits`: raw payload target bits
 - `used_bits` / `total_used_bits`: raw payload bits embedded by the encoder
+- `embedded_bits`: useful payload bits embedded, capped at the target length
+- `fully_embedded`: true when no payload remains
+- `remaining_bits` / `remaining_bits_len`: exact unembedded payload suffix
 - `quality_max_words`: hard accepted word ceiling
 
 ## `POST /reveal`

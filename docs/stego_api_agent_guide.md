@@ -61,12 +61,17 @@ A trial is successful only if encoding, extraction, exact payload-bit match, wor
 
 ## Hide/Reveal
 
-`POST /hide` accepts UTF-8 `secret` text. Its bit accounting is explicit:
+`POST /hide` accepts the exact prompt/context string plus exactly one payload field:
+UTF-8 `secret`, raw `payload_base64`, or raw `payload_bits`. Its bit accounting is explicit:
 
 - `payload_bits`: UTF-8 payload bits
 - `header_bits`: `0`
 - `total_target_bits`: same as payload bits
 - `total_used_bits`: raw payload bits embedded
+- `remaining_bits`: exact unembedded suffix when generation stops early
+
+For raw byte payloads, partial results are returned by default. If the remainder is not
+byte-aligned, continue with `payload_bits=remaining_bits` rather than base64 bytes.
 
 `POST /reveal` returns UTF-8 text and also exposes `payload_bits` and `payload_bits_len`. Pass the `/hide` response's `payload_bits` value back as `payload_bits_len` when revealing. If `payload_bits_len` is omitted, the server only tries the older 16-bit framed decode for legacy stegotext.
 

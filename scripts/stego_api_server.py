@@ -67,7 +67,7 @@ def _summarize_body(body: dict | None) -> dict | None:
     for key, value in body.items():
         summarized[key] = _safe_preview(value) if isinstance(value, str) else value
 
-    for key in ("secret", "stegotext", "prompt"):
+    for key in ("secret", "payload_base64", "payload_bits", "stegotext", "prompt"):
         if key in summarized and isinstance(body.get(key), str):
             raw = body[key]
             summarized[key] = {
@@ -91,7 +91,27 @@ class HideRequest(BaseModel):
             "You are writing natural short movie comments.\n\nExamples:\n- The pacing felt uneven, but the ending stayed with me.\n- The lead performance carried a thin plot.\n\nWrite one new natural short movie comment."
         ],
     )
-    secret: str = Field(..., description="Secret text to hide (UTF-8).")
+    secret: str | None = Field(
+        default=None,
+        description="Secret text to hide as UTF-8. Provide exactly one of secret, payload_base64, or payload_bits.",
+    )
+    payload_base64: str | None = Field(
+        default=None,
+        description="Raw payload bytes encoded as base64. The prompt is used exactly as supplied.",
+    )
+    payload_bits: str | None = Field(
+        default=None,
+        pattern="^[01]+$",
+        description="Raw payload bits. Useful for continuing from a non-byte-aligned remainder.",
+    )
+    allow_partial: bool | None = Field(
+        default=None,
+        description="Return generated stegotext plus remaining payload when generation stops early. Defaults to true for raw payloads.",
+    )
+    enforce_quality: bool | None = Field(
+        default=None,
+        description="Apply the quality gate before accepting a complete generation. Defaults to false for raw payloads.",
+    )
     complete_sent: bool = Field(default=False, description="Whether to auto-complete sentence end.")
     max_new_tokens: int | None = Field(
         default=None,
@@ -158,6 +178,12 @@ class HideResponse(BaseModel):
     quality_metrics: dict
     mode: str
     params_used: dict
+    embedded_bits: int
+    fully_embedded: bool
+    remaining_bits_len: int
+    remaining_bits: str
+    payload_base64: str | None = None
+    remaining_payload_base64: str | None = None
 
 
 class RevealRequest(BaseModel):
@@ -773,9 +799,14 @@ def build_app(cfg: ZGLSConfig) -> FastAPI:
     def hide(req: HideRequest):
         req_id = REQUEST_ID_CTX.get()
         try:
+            has_raw_payload = req.payload_base64 is not None or req.payload_bits is not None
+            allow_partial = has_raw_payload if req.allow_partial is None else bool(req.allow_partial)
+            enforce_quality = (not has_raw_payload) if req.enforce_quality is None else bool(req.enforce_quality)
             result: HideResult = client.hide(
                 prompt=req.prompt,
                 secret=req.secret,
+                payload_base64=req.payload_base64,
+                payload_bits=req.payload_bits,
                 complete_sent=req.complete_sent,
                 request_id=req_id,
                 max_new_tokens=req.max_new_tokens,
@@ -785,12 +816,15 @@ def build_app(cfg: ZGLSConfig) -> FastAPI:
                 temperature=req.temperature,
                 temperature_alpha=req.temperature_alpha,
                 max_bpw=req.max_bpw,
+                allow_partial=allow_partial,
+                enforce_quality=enforce_quality,
             )
             LOGGER.info(
-                "req=%s op=hide payload_bytes=%d used_bits=%d truncated=%s quality_passed=%s",
+                "req=%s op=hide payload_bytes=%d embedded_bits=%d remaining_bits=%d truncated=%s quality_passed=%s",
                 req_id,
                 result.payload_bytes,
-                result.used_bits,
+                result.embedded_bits,
+                result.remaining_bits_len,
                 result.is_truncated,
                 result.quality_passed,
             )

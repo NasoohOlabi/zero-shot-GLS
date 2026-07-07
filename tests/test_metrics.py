@@ -7,19 +7,27 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT / "src"))
 sys.path.append(str(ROOT / "evaluate"))
 
+import zgls_api
 from zgls_api import (
     CapacityTrialResult,
     HEADER_BITS,
+    HideResult,
+    RevealResult,
+    SampleConfig,
+    ZGLSClient,
+    ZGLSConfig,
     best_capacity_success,
     bits_to_payload,
     bits_to_payload_bits,
     bootstrap_ci,
     bootstrap_kld_ci,
+    bytes_to_base64,
     compute_metrics,
     kld_from_counts,
     payload_bits_to_bits,
@@ -205,14 +213,135 @@ def test_capacity_accounting_and_best_success():
     assert best_capacity_success([small, failed_large, medium]) == medium
 
 
+def test_generate_samples_reveal_uses_headerless_payload_length():
+    client = ZGLSClient.__new__(ZGLSClient)
+    client.cover_text = ["one two three four five six seven eight."]
+    client.tokenizer = None
+    reveal_payload_lengths: list[int | None] = []
+
+    def hide(**kwargs):
+        return HideResult(
+            stegotext="A simple clean sentence with enough distinct words today.",
+            stego_token_ids=[1, 2, 3],
+            context_seed=123,
+            effective_prompt_hash="hash",
+            used_bits=8,
+            target_bits=8,
+            bpw_estimate=1.0,
+            payload_bytes=1,
+            payload_bits=8,
+            header_bits=HEADER_BITS,
+            total_target_bits=8,
+            total_used_bits=8,
+            is_truncated=False,
+            ppl=1.0,
+            quality_passed=True,
+            quality_metrics={},
+            mode="huffman",
+            params_used={},
+        )
+
+    def reveal(**kwargs):
+        reveal_payload_lengths.append(kwargs.get("payload_bits_len"))
+        return RevealResult(
+            secret="x",
+            payload_bytes=1,
+            payload_bits="01111000",
+            payload_bits_len=kwargs.get("payload_bits_len"),
+            decode_ok=True,
+            raw_bits_len=8,
+            warnings=[],
+            context_seed=123,
+            effective_prompt_hash="hash",
+            mode="huffman",
+            params_used={},
+        )
+
+    client.hide = hide
+    client.reveal = reveal
+
+    result = ZGLSClient.generate_samples(
+        client,
+        SampleConfig(
+            prompts=["Write one sentence."],
+            secrets=["x"],
+            min_samples=1,
+            max_samples=1,
+            bootstrap_iters=1,
+        ),
+    )
+
+    assert reveal_payload_lengths == [8]
+    assert result.samples[0]["roundtrip_ok"]
+
+
+def test_hide_raw_base64_payload_returns_exact_partial_remainder(monkeypatch):
+    class TokenizerOutput:
+        input_ids = torch.tensor([[10, 11]], dtype=torch.long)
+
+    class FakeTokenizer:
+        def __call__(self, text, return_tensors):
+            assert text == "complete prompt"
+            assert return_tensors == "pt"
+            return TokenizerOutput()
+
+        def decode(self, token_ids):
+            assert token_ids == [99, 100]
+            return "Partial stego text."
+
+    class FakeModel:
+        device = torch.device("cpu")
+
+    def fake_hide_bits(**kwargs):
+        assert kwargs["bits"].bin == "0100000101000010"
+        prompt_ids = kwargs["prompt_ids"]
+        suffix = torch.tensor([[99, 100]], dtype=torch.long)
+        return torch.cat([prompt_ids, suffix], dim=1), True, 9, 1.0
+
+    monkeypatch.setattr(zgls_api.hide_extract, "hide_bits_with_prompt_ids_by_egs", fake_hide_bits)
+
+    client = ZGLSClient.__new__(ZGLSClient)
+    client.cfg = ZGLSConfig(quality_max_retries=0)
+    client.tokenizer = FakeTokenizer()
+    client.model = FakeModel()
+
+    result = ZGLSClient.hide(
+        client,
+        prompt="complete prompt",
+        payload_base64=bytes_to_base64(b"AB"),
+        max_new_tokens=2,
+        allow_partial=True,
+        enforce_quality=False,
+    )
+
+    assert result.stegotext == "Partial stego text."
+    assert result.embedded_bits == 9
+    assert not result.fully_embedded
+    assert result.remaining_bits == "1000010"
+    assert result.remaining_bits_len == 7
+    assert result.remaining_payload_base64 is None
+    assert result.payload_base64 == bytes_to_base64(b"AB")
+
+
 def test_http_models_expose_benchmark_overrides():
     sys.path.append(str(ROOT / "scripts"))
-    from stego_api_server import CapacityProbeRequest, CapacityProbeResponse, HideRequest, RevealRequest
+    from stego_api_server import (
+        CapacityProbeRequest,
+        CapacityProbeResponse,
+        HideRequest,
+        HideResponse,
+        RevealRequest,
+    )
 
     hide_schema = (
         HideRequest.model_json_schema()
         if hasattr(HideRequest, "model_json_schema")
         else HideRequest.schema()
+    )
+    hide_response_schema = (
+        HideResponse.model_json_schema()
+        if hasattr(HideResponse, "model_json_schema")
+        else HideResponse.schema()
     )
     reveal_schema = (
         RevealRequest.model_json_schema()
@@ -230,6 +359,11 @@ def test_http_models_expose_benchmark_overrides():
         else CapacityProbeResponse.schema()
     )
     for field in (
+        "secret",
+        "payload_base64",
+        "payload_bits",
+        "allow_partial",
+        "enforce_quality",
         "max_new_tokens",
         "quality_max_retries",
         "quality_max_words",
@@ -239,6 +373,15 @@ def test_http_models_expose_benchmark_overrides():
         "max_bpw",
     ):
         assert field in hide_schema["properties"]
+    for field in (
+        "embedded_bits",
+        "fully_embedded",
+        "remaining_bits_len",
+        "remaining_bits",
+        "payload_base64",
+        "remaining_payload_base64",
+    ):
+        assert field in hide_response_schema["properties"]
     for field in ("payload_bits_len", "threshold", "temperature", "temperature_alpha", "max_bpw"):
         assert field in reveal_schema["properties"]
     for field in (

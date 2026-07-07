@@ -59,6 +59,7 @@ def test_python_api_roundtrip_edge_cases():
             effective_prompt_hash=hidden.effective_prompt_hash,
             cover_texts=COVER_TEXTS,
             stego_token_ids=hidden.stego_token_ids,
+            payload_bits_len=hidden.payload_bits,
         )
         assert revealed.decode_ok
         assert revealed.secret == secret
@@ -79,6 +80,7 @@ def test_python_api_complete_sentence_and_hash_warning():
         effective_prompt_hash="wrong",
         cover_texts=COVER_TEXTS,
         stego_token_ids=hidden.stego_token_ids,
+        payload_bits_len=hidden.payload_bits,
     )
     assert "provided effective_prompt_hash does not match reconstructed prompt" in revealed.warnings
 
